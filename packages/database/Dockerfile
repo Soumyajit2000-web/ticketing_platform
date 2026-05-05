@@ -1,24 +1,21 @@
-FROM node:20-alpine AS base
+FROM node:20-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    make \
+    g++ \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy all config files needed for pnpm to resolve the workspace
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
-COPY packages/database/package.json ./packages/database/
-COPY packages/typescript-config/package.json ./packages/typescript-config/
-COPY packages/eslint-config/package.json ./packages/eslint-config/
-COPY packages/ui/package.json ./packages/ui/
-COPY apps/api/package.json ./apps/api/
-COPY apps/web/package.json ./apps/web/
+# Copy everything
+COPY . .
 
 # Install dependencies
 RUN pnpm install --no-frozen-lockfile
-
-# Copy the rest of the source code
-COPY . .
 
 # Use programmatic migrations (tsx) instead of drizzle-kit CLI to avoid binary resolution issues
 CMD ["sh", "-c", "npx tsx packages/database/src/migrate.ts && npx tsx packages/database/src/seed.ts"]

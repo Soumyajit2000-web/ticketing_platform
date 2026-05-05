@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ticketing-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ticketing_platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ticketing_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrator:
+    build:
+      context: .
+      dockerfile: packages/database/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ticketing_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ticketing_platform
+      PORT: 3001
+      ADMIN_API_KEY: supersecretadmin
+      PRICING_WEIGHT_TIME: 0.4
+      PRICING_WEIGHT_DEMAND: 0.3
+      PRICING_WEIGHT_INVENTORY: 0.3
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      INTERNAL_API_URL: http://api:3001
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

@@ -1,37 +1,42 @@
-# Design Document
+# Design Document — Event Ticketing Platform
+
+## Overview
+
+A full-stack event ticketing platform featuring a dynamic pricing engine that adjusts ticket prices in real-time based on temporal proximity, booking velocity, and remaining inventory. Built as a Turborepo monorepo with a NestJS API, Next.js 15 frontend, and PostgreSQL via Drizzle ORM.
 
 ## Pricing Algorithm
 
-The dynamic pricing engine uses a **weighted multi-rule system** built around three independent pricing rules — time-based, demand-based, and inventory-based — each producing a percentage adjustment.
+The pricing engine uses a **weighted multi-rule system** with three independent rules, each returning a fractional adjustment:
 
 **Formula:** `currentPrice = basePrice × (1 + Σ(weight_i × adjustment_i))`
 
-Each rule is implemented as a pure function that receives event data and returns a fractional adjustment (e.g., 0.20 for +20%). The rules use tiered thresholds: the time-based rule escalates as the event date approaches (0% at 30+ days, up to 80% on the day of the event), the demand-based rule reacts to booking velocity in the last hour (0% at low activity, up to 40% during surges), and the inventory-based rule increases price as remaining tickets shrink (0% above 80% capacity, up to 50% below 10%).
+- **Time-based:** Escalates as the event approaches — default thresholds of +0% at 30+ days, +20% within 7 days, +50% within 1 day.
+- **Demand-based:** Reacts to booking velocity (sum of ticket quantities in the last hour) — default +15% when ≥10 tickets booked in the last hour.
+- **Inventory-based:** Triggers when remaining inventory drops — default +25% when ≤20% of tickets remain.
 
-Rule weights are configurable via environment variables (`PRICING_WEIGHT_TIME`, `PRICING_WEIGHT_DEMAND`, `PRICING_WEIGHT_INVENTORY`) and default to 0.4/0.3/0.3 respectively. Per-event threshold overrides are stored in a `pricingRules` JSONB column. The final price is clamped between a configurable floor and ceiling to prevent extreme outcomes. This design keeps each rule independently testable while allowing the orchestrator to combine them deterministically.
+Rule weights are configurable via environment variables (`PRICING_WEIGHT_TIME=0.4`, `PRICING_WEIGHT_DEMAND=0.3`, `PRICING_WEIGHT_INVENTORY=0.3`). Per-event threshold overrides are stored in a `pricingRules` JSONB column. The final price is clamped between configurable floor and ceiling values. Each rule is implemented as a pure function, making the calculation fully deterministic and independently testable.
 
 ## Concurrency Solution
 
-Preventing overselling uses a two-phase booking model  "Implicit Status with Expiration" pattern, combined with PostgreSQL's `SELECT ... FOR UPDATE` row-level locking.
+Preventing overselling uses **PostgreSQL `SELECT ... FOR UPDATE` row-level locking** within a two-phase booking model:
 
-**Phase 1 — Reserve:** When a user initiates a booking, we open a database transaction, acquire an exclusive row lock on the event (`SELECT ... FOR UPDATE`), validate availability, insert a booking with `status='pending'` and `expiresAt=now()+10min`, and increment `bookedTickets`. The lock serializes concurrent requests — if two users try to book the last ticket simultaneously, the second transaction blocks until the first commits, then correctly sees the updated count and rejects.
+1. **Reserve** (`POST /bookings`): Opens a transaction, acquires an exclusive row lock on the event, validates availability, inserts a `pending` booking with a 10-minute expiry, and increments `bookedTickets`. The lock serializes concurrent requests — if two users compete for the last ticket, the second transaction blocks until the first commits.
+2. **Confirm** (`PATCH /bookings/:id/confirm`): Transitions status to `confirmed` within the hold window.
+3. **Expiry** (`@Cron` every 60s): Finds expired `pending` bookings, marks them `expired`, and decrements `bookedTickets` to release inventory.
 
-**Phase 2 — Confirm:** The user confirms within the hold window, which transitions `status` from `pending` to `confirmed` and clears `expiresAt`.
-
-**Expiry:** A NestJS `@Cron` job runs every 60 seconds to find `pending` bookings past their `expiresAt`, sets them to `expired`, and decrements `bookedTickets`. This ensures abandoned carts don't permanently lock inventory — a critical improvement over simple instant-commit approaches.
-
-This approach was chosen over optimistic locking (version columns with retries) because it provides stronger guarantees without retry loops, and the reservation hold pattern gives users a fair window to complete their purchase.
+This was chosen over optimistic locking (version columns with retries) because it provides stronger guarantees without retry loops, and the hold pattern gives users a fair window to complete their purchase.
 
 ## Architecture Decisions
 
-The Turborepo monorepo is structured with a shared `@repo/database` package containing Drizzle ORM schema definitions and the database client, consumed by the NestJS API. The frontend communicates exclusively through REST API calls — it never accesses the database directly. NestJS was chosen for its module/controller/service architecture, which provides clean separation of concerns and built-in dependency injection that simplifies testing (services can be mocked at the module level). Docker Compose provides a single-command PostgreSQL setup.
+The monorepo has three layers: `@repo/database` (shared Drizzle schema and client), `apps/api` (NestJS with DI), and `apps/web` (Next.js 15 with Server Components). The frontend communicates exclusively via REST. `POST /events` is protected by an `ApiKeyGuard` (header-based `x-api-key`). Docker Compose orchestrates PostgreSQL, a migrator service (runs migrations before API start), the API, and the web app — with health checks and dependency ordering for reliable cold-start.
 
 ## Trade-offs
 
-- **Polling over WebSockets** for real-time price updates — simpler to implement, sufficient at 30-second intervals, avoids WebSocket infrastructure complexity
-- **Cron-based expiry over Redis TTL** — the Ticketmaster design recommends distributed locks with Redis TTL for production scale, but a cron job is simpler and sufficient for this scope. The tradeoff is up to 60 seconds of lag before expired holds are released
-- **No authentication system** — email-based booking lookup keeps the scope focused on pricing and concurrency
+- **Polling over WebSockets** for price updates — simpler, 30s intervals are sufficient
+- **Cron-based expiry over Redis TTL** — up to 60s lag before expired holds release, but avoids Redis infrastructure
+- **Email-only identification** — no auth system; keeps scope focused on pricing and concurrency
+- **`/bookings/[id]` over `/bookings/success`** — dynamic route enables confirm/expire states on one page
 
 ## Future Improvements
 
-With more time, I would add: Redis-backed distributed locks with TTL for instant ticket release on expiry, a virtual waiting queue (SSE) for high-demand events, WebSocket-based real-time price streaming, API rate limiting, comprehensive E2E tests with Playwright, and a price history chart showing how prices evolved over time.
+Redis-backed distributed locks with TTL for instant ticket release, WebSocket real-time pricing, API rate limiting, Playwright E2E tests, and a price history visualization.

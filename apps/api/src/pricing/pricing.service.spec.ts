@@ -62,6 +62,42 @@ describe('PricingService', () => {
     expect(result.finalPrice).toBe(115);
   });
 
+  it('should apply demand adjustment when booking velocity is high', () => {
+    const event = {
+      basePrice: '100.00',
+      date: new Date(Date.now() + 40 * 24 * 60 * 60 * 1000), // 40 days out — no time adjustment
+      totalTickets: 100,
+      bookedTickets: 0, // full inventory — no inventory adjustment
+      pricingRules: {
+        demandThresholds: [{ velocity: 10, adjustment: 0.15 }],
+      },
+    };
+
+    const result = service.calculatePrice(event, 15); // velocity 15 >= threshold 10
+    // demandAdjustment = 0.15 * 0.3 (default weight) = 0.045
+    // totalMultiplier = 1 + 0 + 0.045 + 0 = 1.045
+    expect(result.finalPrice).toBe(104.5);
+    expect(result.breakdown.demandAdjustment).toBe(0.15);
+    expect(result.breakdown.timeAdjustment).toBe(0);
+    expect(result.breakdown.inventoryAdjustment).toBe(0);
+  });
+
+  it('should not apply demand adjustment when velocity is below threshold', () => {
+    const event = {
+      basePrice: '100.00',
+      date: new Date(Date.now() + 40 * 24 * 60 * 60 * 1000), // 40 days out
+      totalTickets: 100,
+      bookedTickets: 0,
+      pricingRules: {
+        demandThresholds: [{ velocity: 10, adjustment: 0.15 }],
+      },
+    };
+
+    const result = service.calculatePrice(event, 5); // velocity 5 < threshold 10
+    expect(result.finalPrice).toBe(100);
+    expect(result.breakdown.demandAdjustment).toBe(0);
+  });
+
   it('should apply combined pricing rules correctly', () => {
     const event = {
       basePrice: '100.00',

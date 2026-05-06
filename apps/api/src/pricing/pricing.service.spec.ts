@@ -62,19 +62,106 @@ describe('PricingService', () => {
     expect(result.finalPrice).toBe(115);
   });
 
-  it('should apply demand adjustment when velocity is high', () => {
+  it('should apply combined pricing rules correctly', () => {
     const event = {
       basePrice: '100.00',
-      date: new Date(Date.now() + 40 * 24 * 60 * 60 * 1000), // 40 days out
+      date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // 3 days out
       totalTickets: 100,
-      bookedTickets: 0,
+      bookedTickets: 95, // 5% remaining
       pricingRules: {
-        demandThresholds: [{ velocity: 10, adjustment: 0.2 }],
+        timeThresholds: [{ days: 7, adjustment: 0.2 }],
+        demandThresholds: [{ velocity: 10, adjustment: 0.15 }],
+        inventoryThresholds: [{ remainingPercent: 10, adjustment: 0.4 }],
       },
     };
 
-    const result = service.calculatePrice(event, 15); // Velocity of 15 > 10
-    // Adjustment is 0.2 * 0.3 (default weight) = 0.06
-    expect(result.finalPrice).toBe(106);
+    const result = service.calculatePrice(event, 15); // velocity 15 > 10
+
+    // timeAdjustment = 0.2
+    // demandAdjustment = 0.15
+    // inventoryAdjustment = 0.4
+    // totalMultiplier = 1 + (0.2 * 0.4) + (0.15 * 0.3) + (0.4 * 0.3)
+    // totalMultiplier = 1 + 0.08 + 0.045 + 0.12 = 1.245
+    // finalPrice = 100 * 1.245 = 124.5
+    expect(result.finalPrice).toBe(124.5);
+    expect(result.breakdown.totalMultiplier).toBe(1.245);
+  });
+
+  it('should respect price floor constraint', () => {
+    const event = {
+      basePrice: '100.00',
+      priceFloor: '110.00',
+      date: new Date(Date.now() + 40 * 24 * 60 * 60 * 1000), // 40 days out
+      totalTickets: 100,
+      bookedTickets: 0,
+      pricingRules: {},
+    };
+
+    const result = service.calculatePrice(event, 0);
+    // Calculated price would be 100, but floor is 110
+    expect(result.finalPrice).toBe(110);
+  });
+
+  it('should respect price ceiling constraint', () => {
+    const event = {
+      basePrice: '100.00',
+      priceCeiling: '105.00',
+      date: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // 5 days out
+      totalTickets: 100,
+      bookedTickets: 0,
+      pricingRules: {
+        timeThresholds: [{ days: 7, adjustment: 0.2 }],
+      },
+    };
+
+    const result = service.calculatePrice(event, 0);
+    // Calculated price would be 108, but ceiling is 105
+    expect(result.finalPrice).toBe(105);
+  });
+
+  it('should handle floor and ceiling interaction', () => {
+    const eventHigh = {
+      basePrice: '100.00',
+      priceCeiling: '110.00',
+      date: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000), // 1 day out
+      totalTickets: 100,
+      bookedTickets: 0,
+      pricingRules: {
+        timeThresholds: [{ days: 7, adjustment: 0.5 }],
+      },
+    };
+    expect(service.calculatePrice(eventHigh, 0).finalPrice).toBe(110);
+
+    const eventLow = {
+      basePrice: '100.00',
+      priceFloor: '105.00',
+      date: new Date(Date.now() + 40 * 24 * 60 * 60 * 1000),
+      totalTickets: 100,
+      bookedTickets: 0,
+      pricingRules: {},
+    };
+    expect(service.calculatePrice(eventLow, 0).finalPrice).toBe(105);
+  });
+
+  it('should use default thresholds when pricingRules is empty or partial', () => {
+    const event = {
+      basePrice: '100.00',
+      date: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // 5 days out
+      totalTickets: 100,
+      bookedTickets: 90, // 10% remaining
+      pricingRules: {}, // Empty
+    };
+
+    const result = service.calculatePrice(event, 15); // velocity 15
+    // Default time (<=7 days) = 0.2
+    // Default demand (>=10) = 0.15
+    // Default inventory (<=20%) = 0.25
+    // totalMultiplier = 1 + (0.2*0.4) + (0.15*0.3) + (0.25*0.3)
+    // totalMultiplier = 1 + 0.08 + 0.045 + 0.075 = 1.2
+    // finalPrice = 120
+    expect(result.finalPrice).toBe(120);
+    expect(result.breakdown.timeAdjustment).toBe(0.2);
+    expect(result.breakdown.demandAdjustment).toBe(0.15);
+    expect(result.breakdown.inventoryAdjustment).toBe(0.25);
   });
 });
